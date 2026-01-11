@@ -18,7 +18,7 @@ load_dotenv()
 
 st.title('Chat with pdf')
 
-groq_api_key = os.getenv('GROQ_API_KEY')
+groq_api_key = st.secrets.get("GROQ_API_KEY")
 
 if not groq_api_key:
     st.error("GROQ_API_KEY environment variable is not set. Please set it in your .env file.")
