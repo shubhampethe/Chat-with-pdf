@@ -17,99 +17,104 @@ from dotenv import load_dotenv
 load_dotenv()
 
 st.title('Chat with pdf')
-groq_api_key=st.text_input('Enter a groq api key')
+
+groq_api_key = os.getenv('GROQ_API_KEY')
+
+if not groq_api_key:
+    st.error("GROQ_API_KEY environment variable is not set. Please set it in your .env file.")
+    st.stop()
+
 upload_files=st.file_uploader('Choose files to upload',type='pdf',accept_multiple_files=True)
 embeddings=(HuggingFaceEmbeddings(model='all-MiniLM-L6-v2'))
-if groq_api_key:
-    model=ChatGroq(api_key=groq_api_key,model='llama-3.3-70b-versatile')
-    session_id=st.text_input('Enter a session id',value='default_session')
+model=ChatGroq(api_key=groq_api_key,model='llama-3.3-70b-versatile')
+session_id=st.text_input('Enter a session id',value='default_session')
     
-    if 'store' not in st.session_state:
-        st.session_state.store={}
-    
-    if upload_files:
-        documents=[]
-        for uploaded_file in upload_files:
-            pdf_bytes = uploaded_file.getvalue()
-            pdf_stream = BytesIO(pdf_bytes)
+if 'store' not in st.session_state:
+    st.session_state.store={}
 
-            pdf = fitz.open(stream=pdf_stream, filetype="pdf")
+if upload_files:
+    documents=[]
+    for uploaded_file in upload_files:
+        pdf_bytes = uploaded_file.getvalue()
+        pdf_stream = BytesIO(pdf_bytes)
 
-            for page_num, page in enumerate(pdf):
-                text = page.get_text()
-                documents.append(
-                    Document(
-                        page_content=text,
-                        metadata={
-                            "source": uploaded_file.name,
-                            "page": page_num
-                        }
-                    )
+        pdf = fitz.open(stream=pdf_stream, filetype="pdf")
+
+        for page_num, page in enumerate(pdf):
+            text = page.get_text()
+            documents.append(
+                Document(
+                    page_content=text,
+                    metadata={
+                        "source": uploaded_file.name,
+                        "page": page_num
+                    }
                 )
+            )
 
-        
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=500)
-        splits = text_splitter.split_documents(documents)
-        vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
-        retriever = vectorstore.as_retriever() 
+    
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=500)
+    splits = text_splitter.split_documents(documents)
+    vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
+    retriever = vectorstore.as_retriever() 
 
-        contextualize_q_system_prompt=(
-            "Given a chat history and the latest user question"
-            "which might reference context in the chat history, "
-            "formulate a standalone question which can be understood "
-            "without the chat history. Do NOT answer the question, "
-            "just reformulate it if needed and otherwise return it as is."
+    contextualize_q_system_prompt=(
+        "Given a chat history and the latest user question"
+        "which might reference context in the chat history, "
+        "formulate a standalone question which can be understood "
+        "without the chat history. Do NOT answer the question, "
+        "just reformulate it if needed and otherwise return it as is."
+    )
+
+    contextualize_q_prompt=ChatPromptTemplate.from_messages(
+        [
+        ('system',contextualize_q_system_prompt),
+        MessagesPlaceholder('chat_history'),
+        ('human','{input}'),
+    ])
+    history_aware_chat=create_history_aware_retriever(model,retriever,contextualize_q_prompt)
+
+    system_prompt = (
+            "You are an assistant for question-answering tasks. "
+            "Use the following pieces of retrieved context to answer "
+            "the question. If you don't know the answer, say that you "
+            "don't know. Use three sentences maximum and keep the "
+            "answer concise."
+            "\n\n"
+            "{context}"
         )
-
-        contextualize_q_prompt=ChatPromptTemplate.from_messages(
+    
+    qa_prompt = ChatPromptTemplate.from_messages(
             [
-            ('system',contextualize_q_system_prompt),
-            MessagesPlaceholder('chat_history'),
-            ('human','{input}'),
-        ])
-        history_aware_chat=create_history_aware_retriever(model,retriever,contextualize_q_prompt)
-
-        system_prompt = (
-                "You are an assistant for question-answering tasks. "
-                "Use the following pieces of retrieved context to answer "
-                "the question. If you don't know the answer, say that you "
-                "don't know. Use three sentences maximum and keep the "
-                "answer concise."
-                "\n\n"
-                "{context}"
-            )
-        
-        qa_prompt = ChatPromptTemplate.from_messages(
-                [
-                    ("system", system_prompt),
-                    MessagesPlaceholder("chat_history"),
-                    ("human", "{input}"),
-                ]
-            )
-        
-        question_answer_chain=create_stuff_documents_chain(model,qa_prompt)
-        rag_chain=create_retrieval_chain(history_aware_chat,question_answer_chain)
-
-        def get_session_history(session:str)->BaseChatMessageHistory:
-            if session_id not in st.session_state.store:
-                st.session_state.store[session_id]=ChatMessageHistory()
-            return st.session_state.store[session_id]
-        
-        conversational_rag_chain=RunnableWithMessageHistory(
-            rag_chain,get_session_history,
-             input_messages_key="input",
-            history_messages_key="chat_history",
-            output_messages_key="answer"
+                ("system", system_prompt),
+                MessagesPlaceholder("chat_history"),
+                ("human", "{input}"),
+            ]
         )
-        user_input=st.text_input('Question')
-        if user_input:
-            session_history=get_session_history(session_id)
-            response = conversational_rag_chain.invoke(
-                {"input": user_input},
-                config={
-                    "configurable": {"session_id":session_id}
-                },
-            )
-            st.write("Assistant:", response['answer'])
+    
+    question_answer_chain=create_stuff_documents_chain(model,qa_prompt)
+    rag_chain=create_retrieval_chain(history_aware_chat,question_answer_chain)
+
+    def get_session_history(session:str)->BaseChatMessageHistory:
+        if session_id not in st.session_state.store:
+            st.session_state.store[session_id]=ChatMessageHistory()
+        return st.session_state.store[session_id]
+    
+    conversational_rag_chain=RunnableWithMessageHistory(
+        rag_chain,get_session_history,
+         input_messages_key="input",
+        history_messages_key="chat_history",
+        output_messages_key="answer"
+    )
+    user_input=st.text_input('Question')
+    if user_input:
+        session_history=get_session_history(session_id)
+        response = conversational_rag_chain.invoke(
+            {"input": user_input},
+            config={
+                "configurable": {"session_id":session_id}
+            },
+        )
+        st.write("Assistant:", response['answer'])
 
 
